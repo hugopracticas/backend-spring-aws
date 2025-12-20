@@ -7,6 +7,6 @@ import org.springframework.web.bind.annotation.RestController;
 public class HelloController {
     @GetMapping("/api/hello")
     public String hello() {
-        return "Hola desde Spring Boot AWS 😎";
+        return "AWS 😎";
     }
 }
