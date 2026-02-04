@@ -58,7 +58,15 @@ jobs:
           script: |
             set -e
             cd "${{ secrets.EC2_APP_DIR }}"
-            JAR=$(ls -1 *.jar | head -n 1)
-            mv -f "$JAR" app.jar
+
+            echo "Contenido en EC2:"
+            ls -lah
+            echo "Buscando jar..."
+            find . -maxdepth 3 -type f -name "*.jar" -print
+
+            JAR=$(find . -maxdepth 3 -type f -name "*.jar" | head -n 1)
+            echo "Jar encontrado: $JAR"
+
+            sudo mv -f "$JAR" "${{ secrets.EC2_APP_DIR }}/app.jar"
             sudo systemctl restart "${{ secrets.EC2_SERVICE }}"
-            sudo systemctl --no-pager status "${{ secrets.EC2_SERVICE }}" | tail -n 60
+            sudo systemctl --no-pager status "${{ secrets.EC2_SERVICE }}" | tail -n 80  
