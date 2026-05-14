@@ -1,0 +1,147 @@
+#!/bin/bash
+
+target_backup_device="10.207.12.40:/mdbs_backup1"
+target_backup_device_ip=$(echo ${target_backup_device} | cut -d ':' -f 1)
+target_backup_device_directory=$(echo ${target_backup_device} | cut -d ':' -f 2)
+
+target_pg_extra_device="10.207.12.40:/mdbs_shared"
+target_pg_extra_device_ip=$(echo ${target_pg_extra_device} | cut -d ':' -f 1)
+target_pg_extra_device_directory=$(echo ${target_pg_extra_device} | cut -d ':' -f 2)
+
+if [ "$#" -ne 3 ]; then
+    echo "Invalid number of arguments. Please execute the script as show below:"
+    echo "$0 <dc> <type> <database>"
+    exit 1
+fi
+
+dc="$1"
+type="$2"
+database="$3"
+branch=${USER}/${database}_backup_migration
+
+echo "Migration details:"
+echo "dc: $dc"
+echo "env: $type"
+echo "database: $database"
+
+echo ""
+echo "Identifying the pod in the Kubernetes cluster..."
+
+output=$(ssh -A ssh1-den "ssh den-r11-u21 'kubectl --kubeconfig /sharedfs/pg-scripts/mdbs.kubeconfig get po -A | grep $database-0'")
+
+namespace=$(echo "$output" | awk '{print $1}')
+pod=$(echo "$output" | awk '{print $2}')
+replicas=$(echo "$output" | awk '{print $3}')
+state=$(echo "$output" | awk '{print $4}')
+
+echo "Pod has been found, details below:"
+echo "The pod $pod is $state with $replicas replicas in $namespace namespace"
+
+echo ""
+echo "Getting details about ${pod}:"
+
+output2=$(ssh -A ssh1-den "ssh den-r11-u21 'kubectl --kubeconfig /sharedfs/pg-scripts/mdbs.kubeconfig exec $pod -n $namespace -- df -h'")
+walVolume=$(echo "$output2" | grep WAL_archive )
+extraVoluem=$(echo "$output2" | grep pg_extra )
+
+current_backup_device=$(echo "$walVolume" | cut -d' ' -f 1)
+current_backup_device_ip=$(echo ${current_backup_device} | cut -d ':' -f 1)
+current_backup_device_directory=$(echo ${current_backup_device} | cut -d ':' -f 2)
+
+current_pg_extra_device=$(echo "$extraVoluem" | cut -d' ' -f 1)
+current_pg_extra_device_ip=$(echo ${current_pg_extra_device} | cut -d ':' -f 1)
+current_pg_extra_device_directory=$(echo ${current_pg_extra_device} | cut -d ':' -f 2)
+
+echo "The current backup device is: $current_backup_device"
+echo "IP Address: $current_backup_device_ip, Directory: $current_backup_device_directory"
+echo "The target backup device is: $target_backup_device"
+echo "IP Address: $target_backup_device_ip, Directory: $target_backup_device_directory"
+echo ""
+echo ""
+echo "The current pg_extra device is: $current_pg_extra_device"
+echo "IP Address: $current_pg_extra_device_ip, Directory: $current_pg_extra_device_directory"
+echo "The target backup device is: $target_pg_extra_device"
+echo "IP Address: $target_pg_extra_device_ip, Directory: $target_pg_extra_device_directory"
+echo ""
+
+changesToBeCommited="false"
+
+if [[ "$target_backup_device" == *"$current_backup_device"* ]]; then
+    echo "/WAL_archive in pod: $pod, is already part of $target_backup_device. Nothing to do for /WAL_archive"
+else
+    cd ~/pg-scripts
+    
+    yq eval \
+    '(select(.kind == "CronJob") | .spec.jobTemplate.spec.template.spec.volumes[] | select(.name == "'${dc}-${type}-db-${database}-pg-backup-backup'").nfs.server) = "'${target_backup_device_ip}'" \
+    --inplace production/kubernetes/manifests/${dc}/${dc}-${type}-db-${database}-pg-backup.yaml
+
+    yq eval \
+    '(select(.kind == "CronJob") | .spec.jobTemplate.spec.template.spec.volumes[] | select(.name == "'${dc}-${type}-db-${database}-pg-backup-backup'").nfs.path) = "'${target_backup_device_directory}'/'${dc}-${type}-db-${database}'" \
+    --inplace production/kubernetes/manifests/${dc}/${dc}-${type}-db-${database}-pg-backup.yaml
+
+    yq eval '(select(.kind == "StatefulSet") | .spec.template.spec.volumes[] | select(.name == "'${dc}-${type}-db-${database}-backup'").nfs.server) = "'${target_backup_device_ip}'" \
+    --inplace production/kubernetes/manifests/${dc}/${dc}-${type}-db-${database}.yaml
+
+    yq eval '(select(.kind == "StatefulSet") | .spec.template.spec.volumes[] | select(.name == "'${dc}-${type}-db-${database}-backup'").nfs.path) = "'${target_backup_device_directory}'/'${dc}-${type}-db-${database}'" \
+    --inplace production/kubernetes/manifests/${dc}/${dc}-${type}-db-${database}.yaml
+
+    changesToBeCommited="true"
+fi
+
+if [[ "$target_pg_extra_device" == *"$current_pg_extra_device"* ]]; then
+    echo "/pg_extra in pod: $pod, is already part of $target_pg_extra_device. Nothing to do for /pg_extra"
+else
+    cd ~/pg-scripts
+    
+    yq eval \
+    '(select(.kind == "StatefulSet") | .spec.template.spec.volumes[] | select(.name == "'${dc}-${type}-db-${database}-extra'").nfs.server) = "'${target_pg_extra_device_ip}'" \
+    --inplace production/kubernetes/manifests/${dc}/${dc}-${type}-db-${database}.yaml
+
+    yq eval \
+    '(select(.kind == "StatefulSet") | .spec.template.spec.volumes[] | select(.name == "'${dc}-${type}-db-${database}-extra'").nfs.path) = "'${target_pg_extra_device_directory}'/scripts/database/configuration/postgresql_conf/template/								pg_config" \
+    --inplace production/kubernetes/manifests/${dc}/${dc}-${type}-db-${database}.yaml
+
+    changesToBeCommited="true"
+fi
+
+if [[ "$changesToBeCommited" == "true" ]]; then
+
+    git pull origin master
+    echo ""
+    git checkout -b ${branch}
+    echo "the branch: $branch will be created to perform this opperation"
+
+    git diff production/kubernetes/manifests/${dc}/${dc}-${type}-db-${database}.yaml > ~/db-migrator/diff.txt
+    echo "---------------------------" >> ~/db-migrator/diff.txt
+    git diff production/kubernetes/manifests/${dc}/${dc}-${type}-db-${database}-pg-backup.yaml >> ~/db-migrator/diff.txt
+
+    echo ""
+    echo "changes to be commited"
+    cat ~/db-migrator/diff.txt
+
+    read -p "Continue? (y/n): " RESP
+    case "$RESP" in
+        y|Y)
+            echo "Continuing migration"
+            ;;
+        *)
+            echo "Aborting migration..."
+            exit 1
+    esac
+
+    git add .
+    git commit -m "feat: Volume backup migration for database: ${database}, to: ${target_backup_device} device"
+    git push origin $branch
+    echo "The changes were pushed to: $branch"
+
+#   queryResult=$(ssh -J ssh1-den den-r11-u21 << EOF
+#       kubectl --kubeconfig /sharedfs/pg-scripts/mdbs.kubeconfig exec -n $namespace $pod -- bash -c "
+#           su - postgres -c \"psql -d $database -c 'SELECT * FROM pg_stat_activity where state=\\'active\\';'\""
+# EOF
+#   )
+#   echo "$queryResult" > ~/db-migrator/psql.txt
+fi
+
+exit
+
+    
