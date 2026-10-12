@@ -143,5 +143,36 @@ if [[ "$changesToBeCommited" == "true" ]]; then
 fi
 
 exit
+##############
 
-    
+const SOURCE_IP = "10.42.125.4";
+const DEST_IP = "10.42.37.4";
+
+const PAIR_1 = {
+  oldDevice: `${SOURCE_IP}:/mdbs_backup1`,
+  newDevice: `${DEST_IP}:/mdbs_backup7`,
+  oldPath: "/mnt/mdbs_backups/old_backup_path_1",
+  newPath: "/mnt/mdbs_backups/new_backup_path_7",
+  sourceDir: "mdbs_backup1",
+  destDir: "mdbs_backup7"
+};
+
+const PAIR_2 = {
+  oldDevice: `${SOURCE_IP}:/mdbs_backup2`,
+  newDevice: `${DEST_IP}:/mdbs_backup8`,
+  oldPath: "/mnt/mdbs_backups/old_backup_path_2",
+  newPath: "/mnt/mdbs_backups/new_backup_path_8",
+  sourceDir: "mdbs_backup2",
+  destDir: "mdbs_backup8"
+};
+
+
+sudo mkdir -p /mnt/mdbs_backups/old_backup_path_1
+sudo mkdir -p /mnt/mdbs_backups/new_backup_path_7
+sudo mkdir -p /mnt/mdbs_backups/old_backup_path_2
+sudo mkdir -p /mnt/mdbs_backups/new_backup_path_8
+
+sudo mount 10.42.125.4:/mdbs_backup1 /mnt/mdbs_backups/old_backup_path_1
+sudo mount 10.42.37.4:/mdbs_backup7 /mnt/mdbs_backups/new_backup_path_7
+sudo mount 10.42.125.4:/mdbs_backup2 /mnt/mdbs_backups/old_backup_path_2
+sudo mount 10.42.37.4:/mdbs_backup8 /mnt/mdbs_backups/new_backup_path_8
