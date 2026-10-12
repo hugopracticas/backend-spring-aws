@@ -176,3 +176,26 @@ sudo mount 10.42.125.4:/mdbs_backup1 /mnt/mdbs_backups/old_backup_path_1
 sudo mount 10.42.37.4:/mdbs_backup7 /mnt/mdbs_backups/new_backup_path_7
 sudo mount 10.42.125.4:/mdbs_backup2 /mnt/mdbs_backups/old_backup_path_2
 sudo mount 10.42.37.4:/mdbs_backup8 /mnt/mdbs_backups/new_backup_path_8
+
+
+async function getDatabaseInfoInYAML(dc: string, type: string, podName: string) {
+  let yamlContent = await readFileAsString(`../pg-scripts/production/kubernetes/manifests/${dc}/${dc}-${type}-db-${podName}.yaml`);
+  let tmpJSON = parseAllDocuments(yamlContent).map((doc) => doc.toJSON());
+
+  // Buscar el volumen NFS dentro del StatefulSet
+  let path = findStatefulSet(tmpJSON).spec.template.spec.volumes.find((doc: any) => {
+    const p = doc?.nfs?.path?.toLowerCase() || "";
+    return p.includes("mdbs_backup1") || p.includes("mdbs_backup2") || p.includes("mdbs_backup7") || p.includes("mdbs_backup8");
+  });
+
+  const nfsPath: string = path.nfs.path;
+  const dbName = nfsPath.split('/')[nfsPath.split('/').length - 1];
+
+  // Determinar dinámicamente si pertenece al Par 1 o al Par 2
+  let pair = PAIR_1;
+  if (nfsPath.includes("mdbs_backup2") || nfsPath.includes("mdbs_backup8")) {
+    pair = PAIR_2;
+  }
+
+  return { dbName, pair };
+}
