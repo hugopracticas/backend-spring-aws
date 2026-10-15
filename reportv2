@@ -1,0 +1,1549 @@
+interface NfsVolume {
+    volume: string;
+    server: string;
+    path: string;
+}
+
+interface StatefulSetNfsRecord {
+    namespace: string;
+    statefulSet: string;
+    nfsVolumes: NfsVolume[];
+}
+--------------------------
+function parseNfsOutput(
+    stdout: string
+): StatefulSetNfsRecord[] {
+
+    const statefulSetMap =
+        new Map<string, StatefulSetNfsRecord>();
+
+    const lines = stdout
+        .split("\n")
+        .map(line => line.trim())
+        .filter(Boolean);
+
+    for (const line of lines) {
+
+        const fields = line.split("\t");
+
+        const type = fields[0];
+
+        if (type === "NFS_RECORD") {
+
+            const [
+                ,
+                namespace,
+                statefulSet,
+                volume,
+                server,
+                nfsPath
+            ] = fields;
+
+            const key =
+                `${namespace}/${statefulSet}`;
+
+            if (!statefulSetMap.has(key)) {
+
+                statefulSetMap.set(key, {
+                    namespace,
+                    statefulSet,
+                    nfsVolumes: []
+                });
+
+            }
+
+            statefulSetMap
+                .get(key)!
+                .nfsVolumes
+                .push({
+                    volume,
+                    server,
+                    path: nfsPath
+                });
+
+        }
+
+
+        if (type === "NO_NFS") {
+
+            const [
+                ,
+                namespace,
+                statefulSet
+            ] = fields;
+
+            const key =
+                `${namespace}/${statefulSet}`;
+
+            if (!statefulSetMap.has(key)) {
+
+                statefulSetMap.set(key, {
+                    namespace,
+                    statefulSet,
+                    nfsVolumes: []
+                });
+
+            }
+
+        }
+
+    }
+
+    return Array.from(
+        statefulSetMap.values()
+    );
+
+}
+
+-----------------------------------------------------------
+function escapeHtml(
+    value: string
+): string {
+
+    return value
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+------------------------------------------------------------------
+function generateHtmlReport(
+    records: StatefulSetNfsRecord[]
+): string {
+
+    /*
+     * Averiguamos cuál StatefulSet
+     * tiene más NFS.
+     *
+     * Esto determina cuántas columnas
+     * NFS necesitamos.
+     */
+
+    const maxNfsVolumes =
+        Math.max(
+            0,
+            ...records.map(
+                record =>
+                    record.nfsVolumes.length
+            )
+        );
+
+
+    const totalStatefulSets =
+        records.length;
+
+
+    const statefulSetsWithNfs =
+        records.filter(
+            record =>
+                record.nfsVolumes.length > 0
+        ).length;
+
+
+    const statefulSetsWithoutNfs =
+        records.filter(
+            record =>
+                record.nfsVolumes.length === 0
+        ).length;
+
+
+    const totalNfsVolumes =
+        records.reduce(
+            (total, record) =>
+                total +
+                record.nfsVolumes.length,
+            0
+        );
+
+
+    /*
+     * Creamos dinámicamente
+     * NFS 1, NFS 2, NFS 3...
+     */
+
+    const nfsHeaders =
+        Array.from(
+            {
+                length: maxNfsVolumes
+            },
+            (_, index) => `
+                <th>
+                    NFS ${index + 1}
+                </th>
+            `
+        ).join("");
+
+
+    /*
+     * Generamos una sola fila
+     * por StatefulSet.
+     */
+
+    const rows =
+        records
+            .map(record => {
+
+                const hasNfs =
+                    record.nfsVolumes.length > 0;
+
+
+                /*
+                 * Generamos sus celdas NFS.
+                 */
+
+                const nfsCells =
+                    Array.from(
+                        {
+                            length:
+                                maxNfsVolumes
+                        },
+                        (_, index) => {
+
+                            const nfs =
+                                record
+                                    .nfsVolumes[index];
+
+
+                            if (!nfs) {
+
+                                return `
+                                    <td
+                                        class="
+                                            nfs-empty
+                                        "
+                                    >
+                                        —
+                                    </td>
+                                `;
+
+                            }
+
+
+                            return `
+                                <td>
+
+                                    <div
+                                        class="
+                                            nfs-card
+                                        "
+                                    >
+
+                                        <div
+                                            class="
+                                                nfs-volume
+                                            "
+                                        >
+                                            ${escapeHtml(
+                                                nfs.volume
+                                            )}
+                                        </div>
+
+
+                                        <div
+                                            class="
+                                                nfs-detail
+                                            "
+                                        >
+
+                                            <span
+                                                class="
+                                                    label
+                                                "
+                                            >
+                                                Server
+                                            </span>
+
+                                            <code
+                                                class="
+                                                    server
+                                                "
+                                            >
+                                                ${escapeHtml(
+                                                    nfs.server
+                                                )}
+                                            </code>
+
+                                        </div>
+
+
+                                        <div
+                                            class="
+                                                nfs-detail
+                                                nfs-path
+                                            "
+                                        >
+
+                                            <span
+                                                class="
+                                                    label
+                                                "
+                                            >
+                                                Path
+                                            </span>
+
+                                            <code>
+                                                ${escapeHtml(
+                                                    nfs.path
+                                                )}
+                                            </code>
+
+                                        </div>
+
+                                    </div>
+
+                                </td>
+                            `;
+
+                        }
+                    )
+                    .join("");
+
+
+                return `
+
+                    <tr
+                        class="
+                            statefulset-row
+                            ${
+                                hasNfs
+                                    ? "with-nfs"
+                                    : "without-nfs"
+                            }
+                        "
+                    >
+
+                        <td
+                            class="
+                                namespace-cell
+                            "
+                        >
+                            ${escapeHtml(
+                                record.namespace
+                            )}
+                        </td>
+
+
+                        <td
+                            class="
+                                statefulset-cell
+                            "
+                        >
+                            ${escapeHtml(
+                                record.statefulSet
+                            )}
+                        </td>
+
+
+                        ${nfsCells}
+
+                    </tr>
+
+                `;
+
+            })
+            .join("");
+
+
+
+    return `
+
+<!DOCTYPE html>
+
+<html lang="es">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta
+    name="viewport"
+    content="
+        width=device-width,
+        initial-scale=1.0
+    "
+>
+
+<title>
+    Kubernetes NFS Report
+</title>
+
+
+<style>
+
+* {
+    box-sizing: border-box;
+}
+
+
+body {
+
+    margin: 0;
+
+    font-family:
+        Arial,
+        Helvetica,
+        sans-serif;
+
+    background:
+        #f4f7fb;
+
+    color:
+        #1f2937;
+}
+
+
+/* =========================
+   HEADER
+========================= */
+
+.header {
+
+    background:
+        linear-gradient(
+            135deg,
+            #172554,
+            #1e40af
+        );
+
+    color: white;
+
+    padding:
+        32px 50px;
+
+}
+
+
+.header h1 {
+
+    margin: 0;
+
+    font-size: 28px;
+
+}
+
+
+.header p {
+
+    margin:
+        8px
+        0
+        0;
+
+    opacity: .85;
+
+}
+
+
+
+/* =========================
+   CONTAINER
+========================= */
+
+.container {
+
+    width: 96%;
+
+    margin:
+        30px
+        auto;
+
+}
+
+
+
+/* =========================
+   SUMMARY
+========================= */
+
+.summary {
+
+    display: grid;
+
+    grid-template-columns:
+        repeat(
+            auto-fit,
+            minmax(
+                200px,
+                1fr
+            )
+        );
+
+    gap: 18px;
+
+    margin-bottom: 25px;
+
+}
+
+
+.card {
+
+    background: white;
+
+    padding: 22px;
+
+    border-radius: 12px;
+
+    border:
+        1px solid
+        #e5e7eb;
+
+    box-shadow:
+        0 3px 10px
+        rgba(
+            0,
+            0,
+            0,
+            .06
+        );
+
+}
+
+
+.card-title {
+
+    color:
+        #6b7280;
+
+    font-size: 12px;
+
+    font-weight: 600;
+
+    text-transform:
+        uppercase;
+
+    letter-spacing:
+        .6px;
+
+}
+
+
+.card-value {
+
+    margin-top:
+        7px;
+
+    font-size:
+        30px;
+
+    font-weight:
+        bold;
+
+    color:
+        #172554;
+
+}
+
+
+
+/* =========================
+   FILTERS
+========================= */
+
+.filters {
+
+    display: flex;
+
+    justify-content:
+        space-between;
+
+    align-items:
+        center;
+
+    flex-wrap: wrap;
+
+    gap: 20px;
+
+    padding:
+        18px
+        22px;
+
+    margin-bottom:
+        20px;
+
+    background:
+        white;
+
+    border:
+        1px solid
+        #e5e7eb;
+
+    border-radius:
+        12px;
+
+    box-shadow:
+        0 3px 10px
+        rgba(
+            0,
+            0,
+            0,
+            .06
+        );
+
+}
+
+
+.filter-info {
+
+    display: flex;
+
+    flex-direction:
+        column;
+
+    gap: 4px;
+
+}
+
+
+.filter-info strong {
+
+    color:
+        #172554;
+
+}
+
+
+.filter-description {
+
+    color:
+        #6b7280;
+
+    font-size:
+        13px;
+
+}
+
+
+.toggle-section {
+
+    display: flex;
+
+    align-items:
+        center;
+
+    gap:
+        16px;
+
+}
+
+
+#visibleCounter {
+
+    color:
+        #6b7280;
+
+    font-size:
+        13px;
+
+}
+
+
+
+/* =========================
+   TOGGLE
+========================= */
+
+.toggle-container {
+
+    display: flex;
+
+    align-items:
+        center;
+
+    gap:
+        10px;
+
+    cursor:
+        pointer;
+
+    user-select:
+        none;
+
+}
+
+
+.toggle-label {
+
+    font-size:
+        14px;
+
+    font-weight:
+        600;
+
+}
+
+
+.toggle-container input {
+
+    display: none;
+
+}
+
+
+.toggle-slider {
+
+    position:
+        relative;
+
+    width:
+        46px;
+
+    height:
+        24px;
+
+    background:
+        #d1d5db;
+
+    border-radius:
+        999px;
+
+    transition:
+        .25s;
+
+}
+
+
+.toggle-slider::before {
+
+    content: "";
+
+    position:
+        absolute;
+
+    width:
+        18px;
+
+    height:
+        18px;
+
+    top:
+        3px;
+
+    left:
+        3px;
+
+    background:
+        white;
+
+    border-radius:
+        50%;
+
+    box-shadow:
+        0 1px 4px
+        rgba(
+            0,
+            0,
+            0,
+            .25
+        );
+
+    transition:
+        .25s;
+
+}
+
+
+.toggle-container
+input:checked
++
+.toggle-slider {
+
+    background:
+        #2563eb;
+
+}
+
+
+.toggle-container
+input:checked
++
+.toggle-slider::before {
+
+    transform:
+        translateX(
+            22px
+        );
+
+}
+
+
+
+/* =========================
+   TABLE
+========================= */
+
+.table-container {
+
+    background:
+        white;
+
+    border-radius:
+        12px;
+
+    overflow-x:
+        auto;
+
+    border:
+        1px solid
+        #e5e7eb;
+
+    box-shadow:
+        0 3px 10px
+        rgba(
+            0,
+            0,
+            0,
+            .06
+        );
+
+}
+
+
+table {
+
+    width:
+        100%;
+
+    border-collapse:
+        collapse;
+
+    min-width:
+        1000px;
+
+}
+
+
+thead {
+
+    background:
+        #172554;
+
+    color:
+        white;
+
+}
+
+
+th {
+
+    padding:
+        15px
+        18px;
+
+    text-align:
+        left;
+
+    font-size:
+        12px;
+
+    text-transform:
+        uppercase;
+
+    letter-spacing:
+        .5px;
+
+    white-space:
+        nowrap;
+
+}
+
+
+td {
+
+    padding:
+        14px
+        16px;
+
+    border-bottom:
+        1px solid
+        #e5e7eb;
+
+    vertical-align:
+        top;
+
+}
+
+
+tbody tr:hover {
+
+    background:
+        #f8fafc;
+
+}
+
+
+.namespace-cell {
+
+    min-width:
+        180px;
+
+}
+
+
+.statefulset-cell {
+
+    min-width:
+        250px;
+
+    font-weight:
+        600;
+
+    color:
+        #172554;
+
+}
+
+
+
+/* =========================
+   NFS CELL
+========================= */
+
+.nfs-card {
+
+    min-width:
+        270px;
+
+}
+
+
+.nfs-volume {
+
+    font-weight:
+        700;
+
+    color:
+        #1e3a8a;
+
+    margin-bottom:
+        10px;
+
+    word-break:
+        break-word;
+
+}
+
+
+.nfs-detail {
+
+    display: flex;
+
+    flex-direction:
+        column;
+
+    gap:
+        4px;
+
+    margin-top:
+        7px;
+
+}
+
+
+.label {
+
+    color:
+        #6b7280;
+
+    font-size:
+        11px;
+
+    font-weight:
+        600;
+
+    text-transform:
+        uppercase;
+
+}
+
+
+code {
+
+    display:
+        inline-block;
+
+    padding:
+        5px 7px;
+
+    border-radius:
+        5px;
+
+    background:
+        #f3f4f6;
+
+    color:
+        #374151;
+
+    font-size:
+        12px;
+
+    word-break:
+        break-all;
+
+}
+
+
+.server {
+
+    background:
+        #eff6ff;
+
+    color:
+        #1d4ed8;
+
+}
+
+
+.nfs-empty {
+
+    text-align:
+        center;
+
+    color:
+        #9ca3af;
+
+    vertical-align:
+        middle;
+
+}
+
+
+
+/* =========================
+   WITHOUT NFS
+========================= */
+
+.without-nfs {
+
+    background:
+        #fafafa;
+
+    color:
+        #9ca3af;
+
+}
+
+
+.without-nfs
+.statefulset-cell {
+
+    color:
+        #6b7280;
+
+}
+
+
+.hidden-row {
+
+    display:
+        none;
+
+}
+
+
+
+/* =========================
+   FOOTER
+========================= */
+
+.footer {
+
+    margin:
+        30px
+        0;
+
+    text-align:
+        center;
+
+    color:
+        #6b7280;
+
+    font-size:
+        13px;
+
+}
+
+
+
+/* =========================
+   RESPONSIVE
+========================= */
+
+@media
+(max-width: 900px) {
+
+    .header {
+
+        padding:
+            25px;
+
+    }
+
+
+    .container {
+
+        width:
+            97%;
+
+    }
+
+
+    .filters {
+
+        align-items:
+            flex-start;
+
+        flex-direction:
+            column;
+
+    }
+
+
+    .toggle-section {
+
+        width:
+            100%;
+
+        justify-content:
+            space-between;
+
+    }
+
+}
+
+</style>
+
+</head>
+
+
+<body>
+
+
+<div
+    class="
+        header
+    "
+>
+
+    <h1>
+        Kubernetes NFS Inventory
+    </h1>
+
+    <p>
+        StatefulSets y volúmenes
+        NFS encontrados en el cluster
+    </p>
+
+</div>
+
+
+
+<div
+    class="
+        container
+    "
+>
+
+
+<!-- SUMMARY -->
+
+<div
+    class="
+        summary
+    "
+>
+
+    <div
+        class="
+            card
+        "
+    >
+
+        <div
+            class="
+                card-title
+            "
+        >
+            StatefulSets
+        </div>
+
+        <div
+            class="
+                card-value
+            "
+        >
+            ${totalStatefulSets}
+        </div>
+
+    </div>
+
+
+
+    <div
+        class="
+            card
+        "
+    >
+
+        <div
+            class="
+                card-title
+            "
+        >
+            StatefulSets con NFS
+        </div>
+
+        <div
+            class="
+                card-value
+            "
+        >
+            ${statefulSetsWithNfs}
+        </div>
+
+    </div>
+
+
+
+    <div
+        class="
+            card
+        "
+    >
+
+        <div
+            class="
+                card-title
+            "
+        >
+            Volúmenes NFS
+        </div>
+
+        <div
+            class="
+                card-value
+            "
+        >
+            ${totalNfsVolumes}
+        </div>
+
+    </div>
+
+
+
+    <div
+        class="
+            card
+        "
+    >
+
+        <div
+            class="
+                card-title
+            "
+        >
+            StatefulSets sin NFS
+        </div>
+
+        <div
+            class="
+                card-value
+            "
+        >
+            ${statefulSetsWithoutNfs}
+        </div>
+
+    </div>
+
+</div>
+
+
+
+<!-- FILTER -->
+
+<div
+    class="
+        filters
+    "
+>
+
+    <div
+        class="
+            filter-info
+        "
+    >
+
+        <strong>
+            Filtros
+        </strong>
+
+        <span
+            class="
+                filter-description
+            "
+        >
+            Controla qué StatefulSets
+            deseas visualizar.
+        </span>
+
+    </div>
+
+
+    <div
+        class="
+            toggle-section
+        "
+    >
+
+        <span
+            id="
+                visibleCounter
+            "
+        >
+        </span>
+
+
+        <label
+            class="
+                toggle-container
+            "
+        >
+
+            <span
+                class="
+                    toggle-label
+                "
+            >
+                Mostrar StatefulSets
+                sin NFS
+            </span>
+
+
+            <input
+                type="
+                    checkbox
+                "
+                id="
+                    toggleWithoutNfs
+                "
+                checked
+            >
+
+
+            <span
+                class="
+                    toggle-slider
+                "
+            >
+            </span>
+
+        </label>
+
+    </div>
+
+</div>
+
+
+
+<!-- TABLE -->
+
+<div
+    class="
+        table-container
+    "
+>
+
+<table>
+
+
+<thead>
+
+<tr>
+
+    <th>
+        Namespace
+    </th>
+
+    <th>
+        StatefulSet
+    </th>
+
+    ${nfsHeaders}
+
+</tr>
+
+</thead>
+
+
+<tbody>
+
+${rows}
+
+</tbody>
+
+
+</table>
+
+</div>
+
+
+
+<div
+    class="
+        footer
+    "
+>
+
+    Reporte generado:
+    ${new Date().toLocaleString()}
+
+</div>
+
+
+</div>
+
+
+
+<script>
+
+const toggleWithoutNfs =
+    document.getElementById(
+        "toggleWithoutNfs"
+    );
+
+
+const withoutNfsRows =
+    document.querySelectorAll(
+        ".without-nfs"
+    );
+
+
+const allRows =
+    document.querySelectorAll(
+        ".statefulset-row"
+    );
+
+
+const visibleCounter =
+    document.getElementById(
+        "visibleCounter"
+    );
+
+
+function updateNfsFilter() {
+
+    const showWithoutNfs =
+        toggleWithoutNfs.checked;
+
+
+    withoutNfsRows.forEach(
+        row => {
+
+            row.classList.toggle(
+                "hidden-row",
+                !showWithoutNfs
+            );
+
+        }
+    );
+
+
+    const visibleRows =
+        Array.from(
+            allRows
+        )
+        .filter(
+            row =>
+                !row
+                    .classList
+                    .contains(
+                        "hidden-row"
+                    )
+        )
+        .length;
+
+
+    visibleCounter.textContent =
+        visibleRows +
+        " visibles de " +
+        allRows.length;
+
+}
+
+
+toggleWithoutNfs
+    .addEventListener(
+        "change",
+        updateNfsFilter
+    );
+
+
+updateNfsFilter();
+
+</script>
+
+
+</body>
+
+</html>
+
+`;
+
+}
+----------------------------------------------------
+ const result =
+    await runBashOverDoubleSsh(
+        jumpHost,
+        targetHost,
+        bashScript
+    );
+
+
+if (result.exitCode !== 0) {
+
+    console.error(
+        "Error ejecutando la consulta remota"
+    );
+
+    console.error(
+        result.stderr
+    );
+
+    throw new Error(
+        `Remote command failed: ${result.exitCode}`
+    );
+
+}
+
+
+const records =
+    parseNfsOutput(
+        result.stdout
+    );
+
+
+const html =
+    generateHtmlReport(
+        records
+    );
+
+
+const reportPath =
+    path.resolve(
+        process.cwd(),
+        "kubernetes-nfs-report.html"
+    );
+
+
+fs.writeFileSync(
+    reportPath,
+    html,
+    "utf8"
+);
+
+
+console.log(
+    `Reporte generado: ${reportPath}`
+);
+---------------------------------------------------
+                 
