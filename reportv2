@@ -1,3 +1,77 @@
+<script>
+
+document.addEventListener("DOMContentLoaded", () => {
+
+    const toggleWithoutNfs =
+        document.getElementById("toggleWithoutNfs");
+
+    const visibleCounter =
+        document.getElementById("visibleCounter");
+
+    const withoutNfsRows =
+        document.querySelectorAll(".without-nfs");
+
+    const allRows =
+        document.querySelectorAll(".statefulset-row");
+
+
+    if (!toggleWithoutNfs) {
+        console.error(
+            "No se encontró #toggleWithoutNfs"
+        );
+        return;
+    }
+
+
+    function updateNfsFilter() {
+
+        const showWithoutNfs =
+            toggleWithoutNfs.checked;
+
+        withoutNfsRows.forEach(row => {
+
+            row.classList.toggle(
+                "hidden-row",
+                !showWithoutNfs
+            );
+
+        });
+
+
+        const visibleRows =
+            Array.from(allRows)
+                .filter(row =>
+                    !row.classList.contains(
+                        "hidden-row"
+                    )
+                )
+                .length;
+
+
+        if (visibleCounter) {
+
+            visibleCounter.textContent =
+                visibleRows +
+                " visibles de " +
+                allRows.length;
+
+        }
+
+    }
+
+
+    toggleWithoutNfs.addEventListener(
+        "change",
+        updateNfsFilter
+    );
+
+
+    updateNfsFilter();
+
+});
+
+</script>
+-------------------------------------------
 interface NfsVolume {
     volume: string;
     server: string;
