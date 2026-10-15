@@ -1,3 +1,229 @@
+<script>
+
+const toggleWithoutNfs =
+    document.getElementById(
+        "toggleWithoutNfs"
+    );
+
+const withoutNfsRows =
+    document.querySelectorAll(
+        ".without-nfs"
+    );
+
+
+function updateNfsFilter() {
+
+    const showWithoutNfs =
+        toggleWithoutNfs.checked;
+
+
+    withoutNfsRows.forEach(row => {
+
+        if (showWithoutNfs) {
+
+            row.classList.remove(
+                "hidden-row"
+            );
+
+        } else {
+
+            row.classList.add(
+                "hidden-row"
+            );
+
+        }
+
+    });
+
+}
+
+
+toggleWithoutNfs.addEventListener(
+    "change",
+    updateNfsFilter
+);
+
+
+updateNfsFilter();
+
+</script>
+-------------------------------------------
+/* FILTERS */
+
+.filters {
+
+    display: flex;
+
+    align-items: center;
+
+    justify-content: space-between;
+
+    gap: 20px;
+
+    margin-bottom: 20px;
+
+    padding: 18px 22px;
+
+    background: white;
+
+    border-radius: 12px;
+
+    border: 1px solid #e5e7eb;
+
+    box-shadow:
+        0 3px 10px
+        rgba(0,0,0,.06);
+}
+
+
+.filter-info {
+
+    display: flex;
+
+    flex-direction: column;
+
+    gap: 4px;
+}
+
+
+.filter-info strong {
+
+    font-size: 15px;
+
+    color: #172554;
+}
+
+
+.filter-info span {
+
+    font-size: 13px;
+
+    color: #6b7280;
+}
+
+
+/* TOGGLE */
+
+.toggle-container {
+
+    display: flex;
+
+    align-items: center;
+
+    gap: 12px;
+
+    cursor: pointer;
+
+    user-select: none;
+}
+
+
+.toggle-label {
+
+    font-size: 14px;
+
+    font-weight: 600;
+
+    color: #374151;
+}
+
+
+.toggle-container input {
+
+    display: none;
+}
+
+
+.toggle-slider {
+
+    position: relative;
+
+    width: 46px;
+
+    height: 24px;
+
+    background: #d1d5db;
+
+    border-radius: 999px;
+
+    transition: .25s;
+}
+
+
+.toggle-slider::before {
+
+    content: "";
+
+    position: absolute;
+
+    width: 18px;
+
+    height: 18px;
+
+    left: 3px;
+
+    top: 3px;
+
+    background: white;
+
+    border-radius: 50%;
+
+    box-shadow:
+        0 1px 4px
+        rgba(0,0,0,.25);
+
+    transition: .25s;
+}
+
+
+.toggle-container input:checked
++ .toggle-slider {
+
+    background: #2563eb;
+}
+
+
+.toggle-container input:checked
++ .toggle-slider::before {
+
+    transform:
+        translateX(22px);
+}
+
+
+.hidden-row {
+
+    display: none;
+}
+-----------------
+<div class="filters">
+
+    <div class="filter-info">
+        <strong>Filtros</strong>
+        <span>
+            Controla qué StatefulSets deseas visualizar.
+        </span>
+    </div>
+
+    <label class="toggle-container">
+
+        <span class="toggle-label">
+            Mostrar StatefulSets sin NFS
+        </span>
+
+        <input
+            type="checkbox"
+            id="toggleWithoutNfs"
+            checked
+        />
+
+        <span class="toggle-slider"></span>
+
+    </label>
+
+</div>
+
+----------
 import fs from "fs";
 import path from "path";
 
