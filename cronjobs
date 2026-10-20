@@ -1,0 +1,913 @@
+
+import fs from "node:fs";
+import path from "node:path";
+import { spawn } from "node:child_process";
+
+// =====================================================
+// 1. TIPOS DE DATOS
+// =====================================================
+
+interface CommandResult {
+    exitCode: number;
+    stdout: string;
+    stderr: string;
+}
+
+interface NfsVolume {
+    volume: string;
+    server: string;
+    path: string;
+}
+
+interface CronJobRecord {
+    namespace: string;
+    cronJob: string;
+    nfsVolumes: NfsVolume[];
+}
+
+// =====================================================
+// 2. DOBLE SSH
+// =====================================================
+
+function runBashOverDoubleSsh(
+    jumpHost: string,
+    targetHost: string,
+    bashScript: string
+): Promise<CommandResult> {
+
+    const maxRetries = 5;
+    const retryDelayMs = 3000;
+
+    const execute = (
+        retryCount: number
+    ): Promise<CommandResult> => {
+
+        return new Promise((resolve, reject) => {
+
+            const child = spawn("ssh", [
+                "-A",
+                jumpHost,
+                "ssh",
+                targetHost,
+                "bash -s"
+            ], {
+                stdio: ["pipe", "pipe", "pipe"]
+            });
+
+            let stdout = "";
+            let stderr = "";
+            let settled = false;
+
+            child.stdout.on("data", data => {
+                stdout += data.toString();
+            });
+
+            child.stderr.on("data", data => {
+                stderr += data.toString();
+            });
+
+            child.on("error", error => {
+                if (!settled) {
+                    settled = true;
+                    reject(error);
+                }
+            });
+
+            child.on("close", code => {
+
+                if (settled) return;
+
+                const normalizedStderr = stderr
+                    .replace(/\r\n/g, "\n")
+                    .trim();
+
+                const retryableError =
+                    /kex_exchange_identification: read: Connection reset by peer|Connection reset by \S+ port 2222/.test(
+                        normalizedStderr
+                    );
+
+                if (
+                    retryableError &&
+                    retryCount < maxRetries
+                ) {
+                    console.warn(
+                        "Reintentando SSH: " +
+                        (retryCount + 1) +
+                        "/" +
+                        maxRetries
+                    );
+
+                    settled = true;
+
+                    setTimeout(() => {
+                        execute(retryCount + 1)
+                            .then(resolve)
+                            .catch(reject);
+                    }, retryDelayMs);
+
+                    return;
+                }
+
+                settled = true;
+
+                resolve({
+                    exitCode: code ?? 1,
+                    stdout,
+                    stderr
+                });
+            });
+
+            child.stdin.on("error", () => {
+                // El proceso remoto puede cerrar stdin.
+                // El evento close reportará el resultado.
+            });
+
+            child.stdin.end(bashScript);
+        });
+    };
+
+    return execute(0);
+}
+
+// =====================================================
+// 3. SCRIPT BASH REMOTO
+// =====================================================
+
+// Este string se envía mediante SSH al Target Host.
+// No se genera ningún archivo Bash físico.
+
+
+const bashScript = `
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "Consultando CronJobs..." >&2
+
+cronjob_list=$(
+    kubectl get cronjobs -A \\
+        -o jsonpath='{range .items[*]}{.metadata.namespace}{"|"}{.metadata.name}{"\\n"}{end}'
+)
+
+CRONJOBS=()
+
+if [[ -n "$cronjob_list" ]]; then
+    mapfile -t CRONJOBS <<< "$cronjob_list"
+fi
+
+echo "CronJobs encontrados: \${#CRONJOBS[@]}" >&2
+
+for entry in "\${CRONJOBS[@]}"; do
+
+    namespace="\${entry%%|*}"
+    cronjob="\${entry#*|}"
+
+    echo "Procesando: $namespace / $cronjob" >&2
+
+    if ! nfs_volumes=$(
+        kubectl get cronjob "$cronjob" \\
+            -n "$namespace" \\
+            -o go-template='{{range .spec.jobTemplate.spec.template.spec.volumes}}{{if .nfs}}{{printf "%s\\t%s\\t%s\\n" .name .nfs.server .nfs.path}}{{end}}{{end}}'
+    ); then
+        echo "ERROR: $namespace/$cronjob" >&2
+        exit 1
+    fi
+
+    if [[ -z "$nfs_volumes" ]]; then
+
+        printf 'NO_NFS\\t%s\\t%s\\n' \\
+            "$namespace" "$cronjob"
+
+    else
+
+        while IFS=$'\\t' read -r volume server nfs_path; do
+
+            printf 'NFS_RECORD\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \\
+                "$namespace" \\
+                "$cronjob" \\
+                "$volume" \\
+                "$server" \\
+                "$nfs_path"
+
+        done <<< "$nfs_volumes"
+
+    fi
+
+done
+
+echo "Consulta finalizada." >&2
+`;
+
+
+// =====================================================
+// 4. AGRUPAR CRONJOBS Y SUS NFS
+// =====================================================
+
+function parseCronJobNfsOutput(
+    stdout: string
+): CronJobRecord[] {
+
+    const records = new Map<string, CronJobRecord>();
+
+    const lines = stdout
+        .split(/\r?\n/)
+        .filter(line => line.trim().length > 0);
+
+    for (const line of lines) {
+
+        const fields = line.split("\t");
+        const type = fields[0];
+
+        if (type !== "NFS_RECORD" && type !== "NO_NFS") {
+            throw new Error(
+                "Registro remoto desconocido: " + line
+            );
+        }
+
+        const namespace = fields[1];
+        const cronJob = fields[2];
+
+        if (!namespace || !cronJob) {
+            throw new Error(
+                "Registro remoto incompleto: " + line
+            );
+        }
+
+        const key = JSON.stringify([namespace, cronJob]);
+
+        if (!records.has(key)) {
+            records.set(key, {
+                namespace,
+                cronJob,
+                nfsVolumes: []
+            });
+        }
+
+        if (type === "NFS_RECORD") {
+
+            if (
+                fields.length !== 6 ||
+                !fields[3] ||
+                !fields[4] ||
+                !fields[5]
+            ) {
+                throw new Error(
+                    "Registro NFS inválido: " + line
+                );
+            }
+
+            records.get(key)!.nfsVolumes.push({
+                volume: fields[3],
+                server: fields[4],
+                path: fields[5]
+            });
+        }
+    }
+
+    return [...records.values()].sort(
+        (a, b) =>
+            a.namespace.localeCompare(b.namespace) ||
+            a.cronJob.localeCompare(b.cronJob)
+    );
+}
+
+// =====================================================
+// 5. SEGURIDAD HTML
+// =====================================================
+
+function escapeHtml(value: string): string {
+    return value
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
+// =====================================================
+// 6. GENERAR REPORTE HTML
+// =====================================================
+
+function generateCronJobHtmlReport(
+    records: CronJobRecord[]
+): string {
+
+    const totalCronJobs = records.length;
+
+    const cronJobsWithNfs = records.filter(
+        record => record.nfsVolumes.length > 0
+    ).length;
+
+    const cronJobsWithoutNfs =
+        totalCronJobs - cronJobsWithNfs;
+
+    const totalNfsVolumes = records.reduce(
+        (total, record) =>
+            total + record.nfsVolumes.length,
+        0
+    );
+
+    // Determina las columnas NFS necesarias.
+    const maxNfsVolumes = Math.max(
+        1,
+        ...records.map(r => r.nfsVolumes.length)
+    );
+
+    const headers = Array.from(
+        { length: maxNfsVolumes },
+        (_, index) => `<th>NFS ${index + 1}</th>`
+    ).join("");
+
+    // Una sola fila por CronJob.
+    const rows = records.map(record => {
+
+        const hasNfs = record.nfsVolumes.length > 0;
+
+        const nfsCells = Array.from(
+            { length: maxNfsVolumes },
+            (_, index) => {
+
+                const nfs = record.nfsVolumes[index];
+
+                if (!nfs) {
+                    return '<td class="empty">—</td>';
+                }
+
+                return `
+                    <td>
+                        <div class="nfs-card">
+
+                            <div class="volume-name">
+                                ${escapeHtml(nfs.volume)}
+                            </div>
+
+                            <div class="field-label">
+                                NFS Server
+                            </div>
+
+                            <div class="server">
+                                ${escapeHtml(nfs.server)}
+                            </div>
+
+                            <div class="field-label">
+                                NFS Path
+                            </div>
+
+                            <div class="nfs-path">
+                                ${escapeHtml(nfs.path)}
+                            </div>
+
+                        </div>
+                    </td>
+                `;
+            }
+        ).join("");
+
+        return `
+            <tr class="cronjob-row ${hasNfs ? "with-nfs" : "without-nfs"}">
+
+                <td class="namespace">
+                    ${escapeHtml(record.namespace)}
+                </td>
+
+                <td class="cronjob-name">
+                    ${escapeHtml(record.cronJob)}
+
+                    ${
+                        hasNfs
+                            ? ""
+                            : '<span class="no-nfs-label">Sin NFS</span>'
+                    }
+                </td>
+
+                ${nfsCells}
+
+            </tr>
+        `;
+    }).join("");
+
+    return `
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+<meta charset="UTF-8">
+<meta name="viewport"
+      content="width=device-width, initial-scale=1.0">
+
+<title>Kubernetes CronJobs NFS Report</title>
+
+<style>
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    font-family: Arial, Helvetica, sans-serif;
+    background: #f4f7fb;
+    color: #1f2937;
+}
+
+.header {
+    background: linear-gradient(135deg, #172554, #1e40af);
+    color: white;
+    padding: 32px 45px;
+}
+
+.header h1 {
+    margin: 0 0 8px;
+    font-size: 28px;
+}
+
+.header p {
+    margin: 0;
+    color: #cbd5e1;
+}
+
+.container {
+    width: 96%;
+    margin: 28px auto;
+}
+
+/* METRICAS */
+
+.summary {
+    display: grid;
+    grid-template-columns:
+        repeat(auto-fit, minmax(190px, 1fr));
+    gap: 18px;
+    margin-bottom: 24px;
+}
+
+.card {
+    background: white;
+    padding: 22px;
+    border-radius: 12px;
+    border: 1px solid #e5e7eb;
+    box-shadow: 0 3px 10px rgba(0,0,0,.06);
+}
+
+.card-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #64748b;
+    text-transform: uppercase;
+}
+
+.card-value {
+    margin-top: 8px;
+    font-size: 30px;
+    font-weight: bold;
+    color: #172554;
+}
+
+/* FILTROS */
+
+.filters {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 20px;
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    padding: 18px 22px;
+    margin-bottom: 20px;
+}
+
+.filter-info {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.filter-info strong {
+    color: #172554;
+}
+
+.filter-info span {
+    color: #64748b;
+    font-size: 13px;
+}
+
+.toggle-section {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 16px;
+}
+
+#visibleCounter {
+    font-size: 13px;
+    color: #64748b;
+    font-weight: 600;
+}
+
+/* TOGGLE */
+
+.toggle-container {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    cursor: pointer;
+    user-select: none;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.toggle-container input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+}
+
+.toggle-slider {
+    width: 46px;
+    height: 24px;
+    background: #cbd5e1;
+    border-radius: 999px;
+    position: relative;
+    transition: background .25s;
+}
+
+.toggle-slider::before {
+    content: "";
+    position: absolute;
+    width: 18px;
+    height: 18px;
+    left: 3px;
+    top: 3px;
+    background: white;
+    border-radius: 50%;
+    transition: transform .25s;
+    box-shadow: 0 1px 4px rgba(0,0,0,.2);
+}
+
+.toggle-container input:checked + .toggle-slider {
+    background: #2563eb;
+}
+
+.toggle-container input:checked + .toggle-slider::before {
+    transform: translateX(22px);
+}
+
+.toggle-container input:focus-visible + .toggle-slider {
+    outline: 3px solid #93c5fd;
+    outline-offset: 3px;
+}
+
+/* TABLA */
+
+.table-container {
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    overflow-x: auto;
+    box-shadow: 0 3px 10px rgba(0,0,0,.06);
+}
+
+table {
+    width: 100%;
+    min-width: 950px;
+    border-collapse: collapse;
+}
+
+thead {
+    background: #172554;
+    color: white;
+}
+
+th {
+    padding: 16px 18px;
+    font-size: 12px;
+    text-transform: uppercase;
+    text-align: left;
+    white-space: nowrap;
+}
+
+td {
+    padding: 14px 16px;
+    border-bottom: 1px solid #e5e7eb;
+    vertical-align: top;
+}
+
+tbody tr:hover {
+    background: #eff6ff;
+}
+
+.namespace {
+    min-width: 180px;
+    overflow-wrap: anywhere;
+}
+
+.cronjob-name {
+    min-width: 240px;
+    font-weight: 700;
+    color: #172554;
+    overflow-wrap: anywhere;
+}
+
+.nfs-card {
+    min-width: 260px;
+}
+
+.volume-name {
+    color: #1e40af;
+    font-weight: bold;
+    margin-bottom: 12px;
+    overflow-wrap: anywhere;
+}
+
+.field-label {
+    color: #64748b;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    margin: 9px 0 5px;
+}
+
+.server {
+    display: inline-block;
+    background: #dbeafe;
+    color: #1d4ed8;
+    padding: 6px 9px;
+    border-radius: 5px;
+    font-family: monospace;
+    font-size: 12px;
+}
+
+.nfs-path {
+    background: #f1f5f9;
+    color: #374151;
+    padding: 7px 9px;
+    border-radius: 5px;
+    font-family: monospace;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+}
+
+.empty {
+    color: #94a3b8;
+    text-align: center;
+    vertical-align: middle;
+}
+
+.without-nfs {
+    background: #fafafa;
+}
+
+.no-nfs-label {
+    display: block;
+    width: fit-content;
+    margin-top: 8px;
+    padding: 4px 9px;
+    background: #fee2e2;
+    color: #991b1b;
+    border-radius: 20px;
+    font-size: 11px;
+}
+
+.hidden-row {
+    display: none;
+}
+
+.footer {
+    text-align: center;
+    color: #64748b;
+    font-size: 12px;
+    padding: 28px;
+}
+
+@media (max-width: 850px) {
+    .header {
+        padding: 24px;
+    }
+
+    .filters {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .container {
+        width: 98%;
+    }
+}
+</style>
+</head>
+
+<body>
+
+<header class="header">
+    <h1>Kubernetes CronJobs NFS Inventory</h1>
+    <p>
+        CronJobs y volúmenes NFS directos del cluster
+    </p>
+</header>
+
+<main class="container">
+
+    <section class="summary">
+
+        <div class="card">
+            <div class="card-title">CronJobs</div>
+            <div class="card-value">${totalCronJobs}</div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">CronJobs con NFS</div>
+            <div class="card-value">${cronJobsWithNfs}</div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Volúmenes NFS</div>
+            <div class="card-value">${totalNfsVolumes}</div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">CronJobs sin NFS</div>
+            <div class="card-value">${cronJobsWithoutNfs}</div>
+        </div>
+
+    </section>
+
+    <section class="filters">
+
+        <div class="filter-info">
+            <strong>Filtros</strong>
+            <span>
+                Controla qué CronJobs deseas visualizar.
+            </span>
+        </div>
+
+        <div class="toggle-section">
+
+            <span id="visibleCounter"></span>
+
+            <label class="toggle-container">
+
+                <span>Mostrar CronJobs sin NFS</span>
+
+                <input
+                    type="checkbox"
+                    id="toggleWithoutNfs"
+                    checked
+                >
+
+                <span class="toggle-slider"></span>
+
+            </label>
+
+        </div>
+
+    </section>
+
+    <section class="table-container">
+        <table>
+            <thead>
+                <tr>
+                    <th>Namespace</th>
+                    <th>CronJob</th>
+                    ${headers}
+                </tr>
+            </thead>
+
+            <tbody>
+                ${rows}
+            </tbody>
+        </table>
+    </section>
+
+    <footer class="footer">
+        Reporte generado:
+        ${new Date().toLocaleString("es-MX")}
+    </footer>
+
+</main>
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+
+    const toggle = document.getElementById(
+        "toggleWithoutNfs"
+    );
+
+    const counter = document.getElementById(
+        "visibleCounter"
+    );
+
+    const withoutNfsRows = document.querySelectorAll(
+        ".cronjob-row.without-nfs"
+    );
+
+    const allRows = document.querySelectorAll(
+        ".cronjob-row"
+    );
+
+    if (!toggle || !counter) {
+        console.error("No se encontraron controles del filtro");
+        return;
+    }
+
+    function updateFilter() {
+
+        const showWithoutNfs = toggle.checked;
+
+        withoutNfsRows.forEach(function (row) {
+            row.classList.toggle(
+                "hidden-row",
+                !showWithoutNfs
+            );
+        });
+
+        let visibleCount = 0;
+
+        allRows.forEach(function (row) {
+            if (!row.classList.contains("hidden-row")) {
+                visibleCount++;
+            }
+        });
+
+        counter.textContent =
+            visibleCount +
+            " visibles de " +
+            allRows.length;
+    }
+
+    toggle.addEventListener("change", updateFilter);
+
+    updateFilter();
+});
+</script>
+
+</body>
+</html>
+`;
+}
+
+// =====================================================
+// 7. EJECUCION PRINCIPAL
+// =====================================================
+
+async function main(): Promise<void> {
+
+    // CONFIGURA TUS SERVIDORES:
+    const jumpHost = "TU_JUMP_HOST";
+    const targetHost = "TU_TARGET_HOST";
+
+    console.log("====================================");
+    console.log(" Kubernetes CronJobs NFS Inventory");
+    console.log("====================================");
+
+    const result = await runBashOverDoubleSsh(
+        jumpHost,
+        targetHost,
+        bashScript
+    );
+
+    if (result.exitCode !== 0) {
+        console.error(result.stderr);
+
+        throw new Error(
+            "Falló el script remoto. ExitCode: " +
+            result.exitCode
+        );
+    }
+
+    // El script remoto escribe logs en stderr.
+    if (result.stderr.trim()) {
+        console.log(result.stderr.trim());
+    }
+
+    // Convertir stdout en registros agrupados.
+    const records = parseCronJobNfsOutput(
+        result.stdout
+    );
+
+    // Generar y guardar el HTML LOCALMENTE.
+    const html = generateCronJobHtmlReport(records);
+
+    const reportPath = path.resolve(
+        process.cwd(),
+        "kubernetes-cronjobs-nfs-report.html"
+    );
+
+    fs.writeFileSync(reportPath, html, "utf8");
+
+    const totalNfs = records.reduce(
+        (sum, r) => sum + r.nfsVolumes.length,
+        0
+    );
+
+    console.log("====================================");
+    console.log("CronJobs:", records.length);
+    console.log("Volumenes NFS:", totalNfs);
+    console.log("Reporte local:", reportPath);
+    console.log("====================================");
+}
+
+main().catch(error => {
+    console.error("Error:", error);
+    process.exitCode = 1;
+});
