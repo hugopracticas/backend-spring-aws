@@ -1,0 +1,136 @@
+# `index.ts` — Backup Migration Preparation
+
+## Overview
+
+`index.ts` prepares PostgreSQL backup migration changes for a set of databases. It reads the requested databases, checks for the required Kubernetes YAML manifests, prepares a list of eligible databases, updates the relevant NFS configuration in Kubernetes manifests, and prepares Git Pull Requests for review. It also generates operational messages for the migration announcement and alert management.
+
+**Important:** Running `index.ts` is the *preparation* stage. It does not replace the operational migration performed by `apply.ts`. Do not proceed to `apply.ts` until the changes and notifications have been reviewed.
+
+## Prerequisites
+
+- Node.js and **pnpm** installed. Use versions compatible with the project's TypeScript, `tsx`, and Node.js type dependencies. The project does not currently declare a specific Node.js engine version.
+- Git installed, with permission to read and create branches/PRs in the relevant manifests repository.
+- SSH client and any required access to the jump host / target host (where used).
+- `yq` available for YAML updates. Confirm the supported `yq` implementation/version with the team; the script uses `yq eval` syntax.
+- Access to the companion Kubernetes manifests repository. Based on relative paths such as `../pg-scripts`, it likely must be a sibling of `node_db_migrator`; **verify this layout on the execution machine** before running.
+- Appropriate access and approvals for the target environment. Additional utilities or credentials may be required by your deployment setup.
+
+Verify the basic tools:
+
+```bash
+node --version
+pnpm --version
+git --version
+ssh -V
+yq --version
+```
+
+Install the project dependencies from the project root:
+
+```bash
+pnpm install --frozen-lockfile
+```
+
+The package scripts are defined in `package.json` (`start` runs `tsx index.ts`).
+
+## 1. Prepare `list_of_DBs.txt`
+
+Before running the script, edit **`list_of_DBs.txt`** in the project root. Add the database/pod identifiers that should be included in the migration, **one per line**, using the naming convention expected by the script and the manifests repository.
+
+```text
+<database-identifier-1>
+<database-identifier-2>
+```
+
+These are placeholders, not literal database names. Confirm the naming format with an existing known-good entry. Avoid duplicate entries and remove databases that are not part of the planned change.
+
+## 2. Run the preparation script
+
+From the `node_db_migrator` project directory:
+
+```bash
+pnpm start
+```
+
+Equivalent direct command (with dependencies installed):
+
+```bash
+pnpm exec tsx index.ts
+```
+
+**Review the terminal output carefully.** The script may update files in a separate Git working tree and prepare Pull Requests. Confirm the expected target environment and branch before running.
+
+## 3. What the script does
+
+1. Reads the database identifiers from `list_of_DBs.txt`.
+2. Checks for the expected Kubernetes YAML files for each entry.
+3. Records entries missing required YAML manifests in `no_files_found.txt` **and continues processing the remaining databases**.
+4. Builds `pods_to_be_migrated.txt` from the databases that can proceed.
+5. Reads the applicable manifests and identifies PostgreSQL-related resources, including StatefulSets and backup CronJobs.
+6. Prepares NFS server/path changes in the manifests using `yq`.
+7. Prepares Git changes and Pull Requests for review.
+8. Writes operational Slack messages and alert commands to `messages.txt`.
+
+The exact manifest selection and Git/PR behavior should be confirmed against the deployed script version before production use.
+
+## 4. Review the output files
+
+| File | Purpose | Required operator action |
+| --- | --- | --- |
+| `no_files_found.txt` | Databases for which the required YAML files were not found. | Investigate each entry; do not assume it is eligible for migration. |
+| `pods_to_be_migrated.txt` | List automatically populated with databases eligible for the next stage. | Review against the original input; this is the list consumed by `apply.ts`. |
+| `messages.txt` | Generated migration announcements and SREBot commands. | Copy the appropriate messages to the correct Slack channels at the correct stage. |
+
+**Do not assume a database was migrated just because it appears in `pods_to_be_migrated.txt`.** This file indicates preparation-stage eligibility, not successful completion.
+
+## 5. Review Pull Requests
+
+After `index.ts` completes:
+
+1. Open the Git repository hosting the Kubernetes manifests.
+2. Find the Pull Request(s) created by the script.
+3. Verify the database list, target environment, NFS server addresses, NFS paths, and the changes to StatefulSets/CronJobs.
+4. Request review and **approval from another team member before running `apply.ts`**.
+5. **Do not merge the PR yet.** The migration team performs the merge **after `apply.ts` has run and the migration has been verified**.
+6. Investigate any databases in `no_files_found.txt` before deciding whether to rerun preparation.
+
+## 6. Slack notifications and alert management
+
+The generated `messages.txt` contains templates/commands to post manually. Use the correct message for each stage:
+
+| When | Destination | Message or command |
+| --- | --- | --- |
+| **Before** migration | `#eng-integration` | `Hi Team, We are starting Backup migration on:` followed by the affected databases and the generated message content. |
+| **Before** migration | `#eng-ops-all` | `Team, we would like to inform you that the backup migration activity for next DBs:` followed by the affected databases and the generated message content. |
+| **Before** migration | SREBot | `!pausealerts <database-name> express 1h` for each applicable database. |
+| **After** migration | SREBot | `!resumealerts <database-name>` for each applicable database. |
+
+Replace `<database-name>` with the name generated for the corresponding database. Do **not** send the `resumealerts` commands before the migration is complete. Check that alert suppression is active before beginning work; `1h` is a one-hour window, so follow the team's procedure if the activity exceeds it.
+
+## 7. Pre-`apply.ts` checklist
+
+- [ ] `list_of_DBs.txt` contains the intended databases.
+- [ ] `index.ts` finished successfully and its output was reviewed.
+- [ ] `no_files_found.txt` was checked and any missing manifests investigated.
+- [ ] `pods_to_be_migrated.txt` was checked against the intended scope.
+- [ ] Pull Requests and NFS changes were reviewed and **approved by a team member**.
+- [ ] Pull Requests remain **unmerged** until after `apply.ts` and successful verification.
+- [ ] Pre-migration messages were posted to `#eng-integration` and `#eng-ops-all`.
+- [ ] `!pausealerts` commands were posted to SREBot and their effect verified.
+- [ ] The migration window, backups, and rollback procedure were confirmed.
+
+Only then proceed to the documented `apply.ts` workflow.
+
+## Troubleshooting
+
+| Symptom | What to check |
+| --- | --- |
+| `pnpm` not found | Install pnpm and verify it is on `PATH`. |
+| Cannot find YAML files | Database naming convention, manifests checkout, relative directory layout, and branch. |
+| `yq` error | Verify the `yq` implementation and syntax expected by the script. |
+| Git authentication or PR error | Repository access, branch permissions, authentication, and remote configuration. |
+| Missing databases in `pods_to_be_migrated.txt` | Check `no_files_found.txt` and the terminal output before proceeding. |
+
+## Safety notes
+
+This script may modify manifests and create remote Git changes. Run it only with approved database lists and access rights. Do not commit credentials, private keys, internal secrets, or production-specific configuration values into documentation. The generated files may contain internal identifiers and should be handled according to team policy.
