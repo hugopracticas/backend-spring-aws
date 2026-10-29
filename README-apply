@@ -1,0 +1,133 @@
+# `apply.ts` — Backup Migration Execution
+
+## Overview
+
+`apply.ts` performs the operational stage of the PostgreSQL backup migration after preparation with `index.ts`. Based on the workflow reviewed so far, it reads the prepared pod list, checks Kubernetes pod state and storage mounts, connects to the target environment through SSH, prepares NFS-related paths, applies Kubernetes manifests, and handles the backup CronJob.
+
+
+## Prerequisites
+
+- All preparation and approval steps in [`README-index.md`](README-index.md) completed.
+- Node.js and pnpm installed; project dependencies installed using `pnpm install --frozen-lockfile`.
+- Git, SSH, `kubectl`, and any other remote utilities used by the script available in the appropriate execution environments.
+- Access to the jump host, compute/target host, Kubernetes cluster, NFS destination, and manifests repository.
+- Approved migration window, backup/restore plan, and team authorization.
+
+## Input
+
+`pods_to_be_migrated.txt` is produced by `index.ts` and lists the databases/pods eligible for this stage. **Confirm that it matches the approved migration scope before running `apply.ts`.**
+
+## Execution
+
+From the `node_db_migrator` project root:
+
+```bash
+pnpm apply
+```
+
+## Expected workflow (verify against source)
+
+1. Read the prepared list from `pods_to_be_migrated.txt`.
+2. Synchronize the local manifests Git checkout as required.
+3. Inspect the relevant Kubernetes pods and confirm that their state permits migration.
+4. Inspect mounted filesystems, including WAL and `pg_extra` where applicable.
+5. Execute remote commands through the jump host and target host.
+6. Prepare and/or mount the target NFS directories.
+7. Check PostgreSQL availability before applying changes.
+8. Apply the relevant Kubernetes manifests.
+9. Verify the resulting pod, mounts, and backup job state using the team's validation process.
+
+## Execution logs: what operators must check
+
+The following examples are sanitized and illustrative. Compare the **actual** values against the approved migration plan; do not blindly accept any IP address or path.
+
+### 1. Source state and pod readiness
+
+```text
+Getting migration details for POD (master) ----------->
+namespace: example-namespace
+statefulSet name: example-db
+/WAL_archive: OLD_NFS:/vol/dbbackup_vol/example_db
+/pg_extra: OLD_NFS:/vol/dba01_vol/scripts/database/configuration/postgresql_conf/template/pg_conf
+
+The pod example-db-0 is Running with 1/1 replicas in example-namespace namespace
+DATABASE NOT FULLY MIGRATED
+```
+
+`DATABASE NOT FULLY MIGRATED` means the current state still shows a legacy mount; **it is not a success message or an instruction to continue unconditionally**. Confirm the pod, namespace, current mounts, and intended destination.
+
+
+### 2. Inspect the proposed Kubernetes diff
+
+The output contains `diff -u -N` sections for both the **StatefulSet** and the **pg-backup CronJob**. In a unified diff, `-` marks the previous value and `+` the proposed value.
+
+**StatefulSet backup NFS:**
+
+```diff
+-          path: /vol/dbbackup_vol/example_db
+-          server: OLD_NFS
++          path: /mdbs_backup1/example_db
++          server: NEW_NFS
+```
+
+**StatefulSet `pg_extra` NFS:**
+
+```diff
+-          path: /vol/dba01_vol/scripts/database/configuration/postgresql_conf/template/pg_conf
+-          server: OLD_NFS
++          path: /mdbs_shared/scripts/database/configuration/postgresql_conf/template/pg_conf
++          server: NEW_NFS
+```
+
+**pg-backup CronJob NFS:**
+
+```diff
+-          path: /vol/dbbackup_vol/example_db
+-          server: OLD_NFS
++          path: /mdbs_backup1/example_db
++          server: NEW_NFS
+```
+
+Check that both Kubernetes resources point to the **intended** target, and review any unrelated changes (for example, container image registry changes). A sample run also showed an unchanged `path:` line followed by a newly added `path:` line in the `pg_extra` volume. That could produce **duplicate YAML keys**. Stop and inspect the actual rendered manifest before proceeding; do not assume the diff is valid merely because the script displayed it.
+
+### 4. Database check and confirmation prompt
+
+```text
+DataBase name in YAML config file is: example_db
+DataBase name                     : example_db
+
+Query result: []
+DataBase CAN be rebooted, NOT in used
+Continue? [y/N]:
+```
+
+Verify the two database names match. The empty result (`Query result: []`) is an **expected output in the example**, but its safety implications depend on the underlying SQL query, which must be checked in `apply.ts`. The script's `CAN be rebooted` message should be considered one check, not a guarantee that a restart is safe. Confirm the authorized maintenance window and team procedures. Only then type `y` to proceed; otherwise answer `N` and investigate.
+
+### Operator review checklist
+
+- [ ] `pods_to_be_migrated.txt` contains only approved migration targets.
+- [ ] Correct Git checkout, Kubernetes context, namespace, StatefulSet, and pod.
+- [ ] Pod readiness and existing WAL/`pg_extra` mounts match expectations.
+- [ ] Target NFS path, directory, and ownership are correct.
+- [ ] StatefulSet and CronJob diffs contain the intended NFS changes only.
+- [ ] No duplicate YAML keys or unexpected container image changes.
+- [ ] Database names match and the database-use check has been understood.
+- [ ] PR was reviewed and approved **but has not yet been merged**.
+- [ ] Slack announcements and alert pauses were completed before migration.
+- [ ] Explicit confirmation is given only after all checks pass.
+
+## Post-migration actions
+
+- Verify the migration result for **every** database; a successful process exit alone is not sufficient proof that all databases and mounts are correct.
+- After successful migration verification, the migration team merges the approved PR(s).
+- Post `!resumealerts <database-name>` to SREBot **after** the corresponding migration is complete and healthy.
+- Follow the team's incident/escalation procedure if any database or storage validation fails.
+
+## Details to confirm before finalizing this README
+
+- Exact remote SSH prerequisites and host configuration.
+- The PRs from `index.ts` must be **approved but not merged** before execution. The migration team merges them **after running `apply.ts` and verifying the migration**.
+- Exact Kubernetes context, namespace selection, and permission requirements.
+- Whether the script copies data, changes only mounts/manifests, or both.
+- Precise validation commands, retry behavior, and failure/rollback procedure.
+- Whether it produces additional logs or output files.
